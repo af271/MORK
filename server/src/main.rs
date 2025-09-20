@@ -566,6 +566,13 @@ impl Service<Request<IncomingBody>> for MorkService {
             | GET => StopCmd
             | POST => UploadCmd
 
+            // WeightedTriemap Commands
+            | GET => WTCreateCmd
+            | POST => WTAddSExprCmd
+            | POST => WTAddMorkCmd
+            | GET => WTGetTopKCmd
+            | GET => WTGetWeightCmd
+            | GET => WTStatsCmd
 
             | GET => MettaThreadCmd
             | GET => MettaThreadSuspendCmd
@@ -589,6 +596,13 @@ impl Service<Request<IncomingBody>> for MorkService {
             | GET => LoadNeo4jNodePropertiesCmd
             | GET => LoadNeo4jNodeLabelsCmd
 
+            // WeightedTriemap Commands
+            | GET => WTCreateCmd
+            | POST => WTAddSExprCmd
+            | POST => WTAddMorkCmd
+            | GET => WTGetTopKCmd
+            | GET => WTGetWeightCmd
+            | GET => WTStatsCmd
 
             | GET => MettaThreadCmd
             | GET => MettaThreadSuspendCmd

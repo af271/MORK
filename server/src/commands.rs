@@ -1713,6 +1713,23 @@ impl ArgVal {
             _ => unreachable!()
         }
     }
+
+    // Add parse method for String parsing
+    pub fn parse<T: std::str::FromStr>(&self) -> Result<T, T::Err> {
+        match self {
+            Self::String(s) => s.parse(),
+            _ => unreachable!("Expected String ArgVal")
+        }
+    }
+}
+
+impl PartialEq<str> for ArgVal {
+    fn eq(&self, other: &str) -> bool {
+        match self {
+            Self::String(s) => s == other,
+            _ => false,
+        }
+    }
 }
 
 
@@ -1818,7 +1835,331 @@ fn prefix_assertions() {
     core::assert_eq!{pe11.till_constant_to_full(), pe7.till_constant_to_full()};
 }
 
-/// This test is likely testing a useless case and can probably be removed
+// ===***===***===***===***===***===***===***===***===***===***===***===***===***===***===***
+// WeightedTriemap Commands
+// ===***===***===***===***===***===***===***===***===***===***===***===***===***===***===***
+
+use pathmap::weighted_trie::{WeightedTriemap, NodeWeight, TopKEntry};
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use serde_json;
+
+// Global WeightedTriemap storage (thread-safe)
+lazy_static::lazy_static! {
+    static ref WEIGHTED_TRIEMAPS: Arc<Mutex<HashMap<String, WeightedTriemap<String>>>> = 
+        Arc::new(Mutex::new(HashMap::new()));
+}
+
+/// Create a new WeightedTriemap instance
+pub struct WTCreateCmd;
+
+impl CommandDefinition for WTCreateCmd {
+    const NAME: &'static str = "wt_create";
+    const CONST_CMD: &'static Self = &Self;
+    const CONSUME_WORKER: bool = false;
+    
+    fn args() -> &'static [ArgDef] {
+        &[ArgDef{
+            arg_type: ArgType::String,
+            name: "name",
+            desc: "Name/ID for the WeightedTriemap instance",
+            required: true
+        }]
+    }
+    
+    fn properties() -> &'static [PropDef] {
+        &[PropDef {
+            arg_type: ArgType::String,
+            name: "k",
+            desc: "TopK parameter (default: 10)",
+            required: false
+        }]
+    }
+    
+    async fn work(_ctx: MorkService, cmd: Command, _thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
+        let name = cmd.args[0].as_str();
+        let k = cmd.properties[0].as_ref()
+            .and_then(|k_str| k_str.parse::<usize>().ok())
+            .unwrap_or(10);
+        
+        let mut triemaps = WEIGHTED_TRIEMAPS.lock().unwrap();
+        triemaps.insert(name.to_string(), WeightedTriemap::new_with_k(k));
+        
+        let response = format!("WeightedTriemap '{}' created with k={}", name, k);
+        Ok(WorkResult::Immediate(response.into()))
+    }
+}
+
+/// Add an S-expression to a WeightedTriemap
+pub struct WTAddSExprCmd;
+
+impl CommandDefinition for WTAddSExprCmd {
+    const NAME: &'static str = "wt_add_sexpr";
+    const CONST_CMD: &'static Self = &Self;
+    const CONSUME_WORKER: bool = false;
+    
+    fn args() -> &'static [ArgDef] {
+        &[ArgDef{
+            arg_type: ArgType::String,
+            name: "name",
+            desc: "Name/ID of the WeightedTriemap instance",
+            required: true
+        },
+        ArgDef{
+            arg_type: ArgType::String,
+            name: "sexpr",
+            desc: "S-expression to add",
+            required: true
+        },
+        ArgDef{
+            arg_type: ArgType::String,
+            name: "value", 
+            desc: "Value to associate with the expression",
+            required: true
+        }]
+    }
+    
+    fn properties() -> &'static [PropDef] {
+        &[PropDef {
+            arg_type: ArgType::String,
+            name: "extract_subtrees",
+            desc: "Whether to extract subtrees (true/false, default: false)",
+            required: false
+        }]
+    }
+    
+    async fn work(_ctx: MorkService, cmd: Command, _thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
+        let name = cmd.args[0].as_str();
+        let sexpr = cmd.args[1].as_str();
+        let value = cmd.args[2].as_str();
+        let extract_subtrees = cmd.properties[0].as_ref()
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        
+        let mut triemaps = WEIGHTED_TRIEMAPS.lock().unwrap();
+        let triemap = triemaps.get_mut(name)
+            .ok_or_else(|| CommandError::external(StatusCode::NOT_FOUND, format!("WeightedTriemap '{}' not found", name)))?;
+        
+        triemap.add_sexpr(sexpr, value.to_string(), extract_subtrees);
+        
+        let response = format!("Added S-expression to WeightedTriemap '{}'", name);
+        Ok(WorkResult::Immediate(response.into()))
+    }
+}
+
+/// Add a MORK expression to a WeightedTriemap
+pub struct WTAddMorkCmd;
+
+impl CommandDefinition for WTAddMorkCmd {
+    const NAME: &'static str = "wt_add_mork";
+    const CONST_CMD: &'static Self = &Self;
+    const CONSUME_WORKER: bool = false;
+    
+    fn args() -> &'static [ArgDef] {
+        &[ArgDef{
+            arg_type: ArgType::String,
+            name: "name",
+            desc: "Name/ID of the WeightedTriemap instance",
+            required: true
+        },
+        ArgDef{
+            arg_type: ArgType::String,
+            name: "expr_text",
+            desc: "MORK expression text to add",
+            required: true
+        },
+        ArgDef{
+            arg_type: ArgType::String,
+            name: "value",
+            desc: "Value to associate with the expression",
+            required: true
+        }]
+    }
+    
+    fn properties() -> &'static [PropDef] {
+        &[PropDef {
+            arg_type: ArgType::String,
+            name: "extract_subtrees",
+            desc: "Whether to extract subtrees (true/false, default: false)",
+            required: false
+        }]
+    }
+    
+    async fn work(_ctx: MorkService, cmd: Command, _thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
+        let name = cmd.args[0].as_str();
+        let expr_text = cmd.args[1].as_str();
+        let value = cmd.args[2].as_str();
+        let extract_subtrees = cmd.properties[0].as_ref()
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        
+        let mut triemaps = WEIGHTED_TRIEMAPS.lock().unwrap();
+        let triemap = triemaps.get_mut(name)
+            .ok_or_else(|| CommandError::external(StatusCode::NOT_FOUND, format!("WeightedTriemap '{}' not found", name)))?;
+        
+        triemap.add_mork_expr_from_text(expr_text, value.to_string(), extract_subtrees)
+            .map_err(|e| CommandError::external(StatusCode::BAD_REQUEST, format!("MORK parsing error: {}", e.0)))?;
+        
+        let response = format!("Added MORK expression to WeightedTriemap '{}'", name);
+        Ok(WorkResult::Immediate(response.into()))
+    }
+}
+
+/// Get TopK entries from a WeightedTriemap
+pub struct WTGetTopKCmd;
+
+impl CommandDefinition for WTGetTopKCmd {
+    const NAME: &'static str = "wt_topk";
+    const CONST_CMD: &'static Self = &Self;
+    const CONSUME_WORKER: bool = false;
+    
+    fn args() -> &'static [ArgDef] {
+        &[ArgDef{
+            arg_type: ArgType::String,
+            name: "name",
+            desc: "Name/ID of the WeightedTriemap instance",
+            required: true
+        }]
+    }
+    
+    fn properties() -> &'static [PropDef] {
+        &[PropDef {
+            arg_type: ArgType::String,
+            name: "sort_by",
+            desc: "Sort by: 'composite' (default), 'local_count', 'subtree_count'",
+            required: false
+        }]
+    }
+    
+    async fn work(_ctx: MorkService, cmd: Command, _thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
+        let name = cmd.args[0].as_str();
+        let sort_by = cmd.properties[0].as_ref().map(|s| s.as_str()).unwrap_or("composite");
+        
+        let triemaps = WEIGHTED_TRIEMAPS.lock().unwrap();
+        let triemap = triemaps.get(name)
+            .ok_or_else(|| CommandError::external(StatusCode::NOT_FOUND, format!("WeightedTriemap '{}' not found", name)))?;
+        
+        let mut topk = triemap.get_topk();
+        
+        // Sort based on requested criterion
+        match sort_by {
+            "local_count" => topk.sort_by(|a, b| b.weight.local_count.cmp(&a.weight.local_count)),
+            "subtree_count" => topk.sort_by(|a, b| b.weight.subtree_count.cmp(&a.weight.subtree_count)),
+            _ => {} // Already sorted by composite score
+        }
+        
+        // Convert to JSON
+        let json_entries: Vec<serde_json::Value> = topk.iter().map(|entry| {
+            serde_json::json!({
+                "path": String::from_utf8_lossy(&entry.path),
+                "local_count": entry.weight.local_count,
+                "subtree_count": entry.weight.subtree_count,
+                "compress_gain_sum": entry.weight.compress_gain_sum,
+                "composite_score": entry.composite_score
+            })
+        }).collect();
+        
+        let response = serde_json::to_string(&json_entries)
+            .map_err(|e| CommandError::external(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON serialization error: {}", e)))?;
+        
+        Ok(WorkResult::Immediate(response.into()))
+    }
+}
+
+/// Get weight for a specific path in a WeightedTriemap
+pub struct WTGetWeightCmd;
+
+impl CommandDefinition for WTGetWeightCmd {
+    const NAME: &'static str = "wt_weight";
+    const CONST_CMD: &'static Self = &Self;
+    const CONSUME_WORKER: bool = false;
+    
+    fn args() -> &'static [ArgDef] {
+        &[ArgDef{
+            arg_type: ArgType::String,
+            name: "name",
+            desc: "Name/ID of the WeightedTriemap instance",
+            required: true
+        },
+        ArgDef{
+            arg_type: ArgType::String,
+            name: "path",
+            desc: "Path to get weight for",
+            required: true
+        }]
+    }
+    
+    fn properties() -> &'static [PropDef] { &[] }
+    
+    async fn work(_ctx: MorkService, cmd: Command, _thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
+        let name = cmd.args[0].as_str();
+        let path = cmd.args[1].as_str();
+        
+        let triemaps = WEIGHTED_TRIEMAPS.lock().unwrap();
+        let triemap = triemaps.get(name)
+            .ok_or_else(|| CommandError::external(StatusCode::NOT_FOUND, format!("WeightedTriemap '{}' not found", name)))?;
+        
+        let weight = triemap.get_weight(path);
+        
+        let response = match weight {
+            Some(w) => serde_json::to_string(&serde_json::json!({
+                "path": path,
+                "local_count": w.local_count,
+                "subtree_count": w.subtree_count,
+                "compress_gain_sum": w.compress_gain_sum,
+                "composite_weight": w.composite_weight()
+            })),
+            None => serde_json::to_string(&serde_json::json!({
+                "path": path,
+                "found": false
+            }))
+        }.map_err(|e| CommandError::external(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON serialization error: {}", e)))?;
+        
+        Ok(WorkResult::Immediate(response.into()))
+    }
+}
+
+/// Get statistics about a WeightedTriemap
+pub struct WTStatsCmd;
+
+impl CommandDefinition for WTStatsCmd {
+    const NAME: &'static str = "wt_stats";
+    const CONST_CMD: &'static Self = &Self;
+    const CONSUME_WORKER: bool = false;
+    
+    fn args() -> &'static [ArgDef] {
+        &[ArgDef{
+            arg_type: ArgType::String,
+            name: "name",
+            desc: "Name/ID of the WeightedTriemap instance",
+            required: true
+        }]
+    }
+    
+    fn properties() -> &'static [PropDef] { &[] }
+    
+    async fn work(_ctx: MorkService, cmd: Command, _thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
+        let name = cmd.args[0].as_str();
+        
+        let triemaps = WEIGHTED_TRIEMAPS.lock().unwrap();
+        let triemap = triemaps.get(name)
+            .ok_or_else(|| CommandError::external(StatusCode::NOT_FOUND, format!("WeightedTriemap '{}' not found", name)))?;
+        
+        let topk = triemap.get_topk();
+        let stats = serde_json::json!({
+            "name": name,
+            "total_topk_entries": topk.len(),
+            "highest_local_count": topk.first().map(|e| e.weight.local_count).unwrap_or(0),
+            "highest_composite_score": topk.first().map(|e| e.composite_score).unwrap_or(0.0)
+        });
+        
+        let response = serde_json::to_string(&stats)
+            .map_err(|e| CommandError::external(StatusCode::INTERNAL_SERVER_ERROR, format!("JSON serialization error: {}", e)))?;
+        
+        Ok(WorkResult::Immediate(response.into()))
+    }
+}
+
 #[cfg(test)]
 #[tokio::test]
 async fn misbehaving_transform() -> Result<(), ()> {
