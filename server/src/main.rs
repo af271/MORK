@@ -568,8 +568,8 @@ impl Service<Request<IncomingBody>> for MorkService {
 
             // WeightedTriemap Commands
             | GET => WTCreateCmd
-            | POST => WTAddSExprCmd
-            | POST => WTAddMorkCmd
+            | GET => WTAddSExprCmd
+            | GET => WTAddMorkCmd
             | GET => WTGetTopKCmd
             | GET => WTGetWeightCmd
             | GET => WTStatsCmd
@@ -578,6 +578,7 @@ impl Service<Request<IncomingBody>> for MorkService {
             | GET => MettaThreadSuspendCmd
             | POST => TransformCmd
         }
+
         #[cfg(feature="neo4j")]
         dispatch!{
             | GET => BusywaitCmd
@@ -598,8 +599,8 @@ impl Service<Request<IncomingBody>> for MorkService {
 
             // WeightedTriemap Commands
             | GET => WTCreateCmd
-            | POST => WTAddSExprCmd
-            | POST => WTAddMorkCmd
+            | GET => WTAddSExprCmd
+            | GET => WTAddMorkCmd
             | GET => WTGetTopKCmd
             | GET => WTGetWeightCmd
             | GET => WTStatsCmd
