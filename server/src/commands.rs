@@ -1931,16 +1931,20 @@ impl CommandDefinition for WTAddSExprCmd {
     async fn work(_ctx: MorkService, cmd: Command, _thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
         let name = cmd.args[0].as_str();
         let sexpr = cmd.args[1].as_str();
-        let value = cmd.args[2].as_str();
+        let value_str = cmd.args[2].as_str();
         let extract_subtrees = cmd.properties[0].as_ref()
             .map(|s| s == "true")
             .unwrap_or(false);
+        
+        // Parse value as float
+        let value: f64 = value_str.parse()
+            .map_err(|_| CommandError::external(StatusCode::BAD_REQUEST, format!("Invalid value '{}': must be a number", value_str)))?;
         
         let mut triemaps = WEIGHTED_TRIEMAPS.lock().unwrap();
         let triemap = triemaps.get_mut(name)
             .ok_or_else(|| CommandError::external(StatusCode::NOT_FOUND, format!("WeightedTriemap '{}' not found", name)))?;
         
-        triemap.add_sexpr(sexpr, value.to_string(), extract_subtrees);
+        triemap.add_sexpr_with_gain(sexpr, "".to_string(), value, extract_subtrees);
         
         let response = format!("Added S-expression to WeightedTriemap '{}'", name);
         Ok(WorkResult::Immediate(response.into()))
@@ -1988,16 +1992,20 @@ impl CommandDefinition for WTAddMorkCmd {
     async fn work(_ctx: MorkService, cmd: Command, _thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
         let name = cmd.args[0].as_str();
         let expr_text = cmd.args[1].as_str();
-        let value = cmd.args[2].as_str();
+        let value_str = cmd.args[2].as_str();
         let extract_subtrees = cmd.properties[0].as_ref()
             .map(|s| s == "true")
             .unwrap_or(false);
+        
+        // Parse value as float
+        let value: f64 = value_str.parse()
+            .map_err(|_| CommandError::external(StatusCode::BAD_REQUEST, format!("Invalid value '{}': must be a number", value_str)))?;
         
         let mut triemaps = WEIGHTED_TRIEMAPS.lock().unwrap();
         let triemap = triemaps.get_mut(name)
             .ok_or_else(|| CommandError::external(StatusCode::NOT_FOUND, format!("WeightedTriemap '{}' not found", name)))?;
         
-        triemap.add_mork_expr_from_text(expr_text, value.to_string(), extract_subtrees)
+        triemap.add_mork_expr_with_gain(expr_text, "".to_string(), value, extract_subtrees)
             .map_err(|e| CommandError::external(StatusCode::BAD_REQUEST, format!("MORK parsing error: {}", e.0)))?;
         
         let response = format!("Added MORK expression to WeightedTriemap '{}'", name);
