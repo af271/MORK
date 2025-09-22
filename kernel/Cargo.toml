@@ -27,3 +27,7 @@ rand = "0.9.1"
 default = []
 neo4j = ["dep:neo4rs", "dep:tokio"]
 interning = []
+
+[[example]]
+name = "weighted_space_demo"
+path = "../examples/weighted_space_demo.rs"
