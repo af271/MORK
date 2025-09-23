@@ -39,8 +39,8 @@ impl WeightedSpace {
         }
     }
 
-    /// Query with weight information included in results - REAL IMPLEMENTATION
-    /// This method automatically tracks weights of expressions that match the query
+    /// Query with weight information included in results
+    /// This method provides access to existing weights without modifying them
     pub fn query_multi_weighted<F>(&self, patterns: &[Expr], mut effect: F) -> usize 
     where 
         F: FnMut(Result<&[ExprEnv], (BTreeMap<(u8, u8), ExprEnv>, u8, u8, &[(u8, u8)])>, Expr, NodeWeight) -> bool,
@@ -48,15 +48,12 @@ impl WeightedSpace {
         let weights_ref = self.weights.clone();
         
         self.base_space.query_multi(patterns, |result, expr| {
-            // Get the expression path for weight lookup/tracking
+            // Get the expression path for weight lookup
             let path = unsafe { expr.span().as_ref().unwrap() };
             
-            // Automatically increment weight count for this expression since it was queried
+            // Get current weight without modifying it
             let weight = {
-                let mut weights_guard = weights_ref.lock().unwrap();
-                // Increment count by 1 each time this expression is found by a query
-                let _ = weights_guard.increment_count(path, 1);
-                // Return the updated weight
+                let weights_guard = weights_ref.lock().unwrap();
                 weights_guard.get_weight_copy(path).unwrap_or_default()
             };
             
@@ -65,15 +62,12 @@ impl WeightedSpace {
         })
     }
 
-    /// Regular query method that automatically tracks expression frequency
+    /// Regular query method that delegates to base_space
     pub fn query<F>(&self, pattern: Expr, mut effect: F) 
     where 
         F: FnMut(Expr) -> (),
     {
-        self.query_multi_weighted(&[pattern], |_result, expr, _weight| {
-            effect(expr);
-            true // Continue with all results
-        });
+        self.base_space.query(pattern, effect);
     }
 
     /// Query and collect weighted results
@@ -173,7 +167,7 @@ mod tests {
     use mork_bytestring::Tag;
 
     // Real test data similar to lib.rs
-    const REAL_SEXPRS: &str = r#"(first_name John)
+    const SEXPRS: &str = r#"(first_name John)
 (last_name Smith)
 (is_alive true)
 (age 27)
@@ -218,18 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn test_weighted_query_integration() {
-        let space = WeightedSpace::new();
-        
-        // This test would need actual expressions in the space to be meaningful
-        // For now, just verify the query method doesn't panic
-        let patterns = vec![];
-        let results = space.query_weighted_collect(&patterns);
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_real_weighted_queries() {
+    fn test_weighted_queries() {
         use crate::{expr, sexpr};
         use crate::space_temporary::Space;
         
@@ -240,7 +223,7 @@ mod tests {
         let metadata_expr = expr!(space, "_1");
         
         let loaded_count = space.load_sexpr_simple(
-            REAL_SEXPRS.as_bytes(), 
+            SEXPRS.as_bytes(), 
             pattern_expr, 
             metadata_expr
         ).unwrap();
@@ -248,7 +231,7 @@ mod tests {
         println!("Loaded {} expressions", loaded_count);
         assert!(loaded_count > 0, "Should load some expressions");
 
-        // Now perform REAL queries that will automatically track weights
+        // Perform queries - weights should remain 0 since we don't auto-increment
         let children_pattern = expr!(space, "[2] children [2] $ $");
         
         let mut found_children = Vec::new();
@@ -276,7 +259,14 @@ mod tests {
         println!("Query found {} children expressions", query_count);
         assert!(query_count > 0, "Should find some children expressions");
         
-        // Query again - weights should have increased because expressions were queried again
+        // Test manual weight increment
+        for (path, _weight, expr_str) in &found_children {
+            // Manually increment weight for each found expression
+            space.increment_expression_count(path, 1).unwrap();
+            println!("Manually incremented weight for: {}", expr_str);
+        }
+        
+        // Query again - weights should now be 1 due to manual increment
         let mut found_children_second = Vec::new();
         let mut second_match_index = 0;
         let second_query_count = space.query_multi_weighted(&[children_pattern], |_result, expr, weight| {
@@ -293,18 +283,6 @@ mod tests {
 
         assert_eq!(second_query_count, query_count, "Should find same number of expressions");
         
-        // Verify that weights increased between first and second query
-        for (i, ((path1, weight1, expr1), (path2, weight2, expr2))) in 
-            found_children.iter().zip(found_children_second.iter()).enumerate() {
-            assert_eq!(path1, path2, "Paths should be identical");
-            assert_eq!(expr1, expr2, "Expressions should be identical");
-            assert!(weight2.local_count > weight1.local_count, 
-                    "Weight {} should have increased from {} to {} after second query", 
-                    i, weight1.local_count, weight2.local_count);
-            println!("✓ Match {}: '{}' weight increased from {} to {}", 
-                     i, expr1, weight1.local_count, weight2.local_count);
-        }
-
         // Test top-k functionality with real data
         let top_expressions = space.get_top_k_expressions(3);
         println!("Top {} expressions by weight:", top_expressions.len());
@@ -328,61 +306,61 @@ mod tests {
         let pattern_expr = expr!(space, "$");
         let metadata_expr = expr!(space, "_1"); 
         space.load_sexpr_simple(
-            REAL_SEXPRS.as_bytes(), 
+            SEXPRS.as_bytes(), 
             pattern_expr, 
             metadata_expr
         ).unwrap();
 
-        // Use the simple query method which should auto-track weights
+        // Use the simple query method - weights should start at 0
         let address_pattern = expr!(space, "[2] address [2] $ $");
         
-        // Query multiple times and verify weight tracking
-        let mut query_results = Vec::new();
+        let mut found_expressions = Vec::new();
         
-        for i in 1..=3 {
-            println!("Query iteration {}", i);
-            let mut match_index = 0;
-            space.query(address_pattern, |expr| {
-                let path = unsafe { expr.span().as_ref().unwrap() };
-                let expr_str = sexpr!(space, expr);
-                if let Some(weight) = space.get_expression_weight(path) {
-                    println!("  Match {}: {} (weight: {})", match_index, expr_str, weight.local_count);
-                    
-                    // Validate match structure - we see we only get 2 address matches
-                    match match_index {
-                        0 => { assert_eq!(expr_str, "((address (state NY)))") }
-                        1 => { assert_eq!(expr_str, "((address (postal_code 10021-3100)))") }
-                        _ => { println!("Additional address match: {}", expr_str) }
-                    }
-                    
-                    query_results.push((i, path.to_vec(), weight.local_count, expr_str));
-                    match_index += 1;
-                }
-            });
-        }
-        
-        // Verify that weights increase with each query
-        assert!(!query_results.is_empty(), "Should find some address expressions");
-        
-        // Group by expression path and check weight progression
-        let mut weight_progressions: std::collections::HashMap<Vec<u8>, Vec<(u64, String)>> = 
-            std::collections::HashMap::new();
+        // First query - collect expressions and their initial weights (should be 0)
+        println!("Query iteration 1");
+        let mut match_index = 0;
+        space.query_multi_weighted(&[address_pattern], |_result, expr, weight| {
+            let path = unsafe { expr.span().as_ref().unwrap() };
+            let expr_str = sexpr!(space, expr);
+            println!("  Match {}: {} (weight: {})", match_index, expr_str, weight.local_count);
             
-        for (iteration, path, weight, expr_str) in query_results {
-            weight_progressions.entry(path).or_insert_with(Vec::new).push((weight, expr_str));
+            // Validate match structure - we see we only get 2 address matches
+            match match_index {
+                0 => { assert_eq!(expr_str, "((address (state NY)))") }
+                1 => { assert_eq!(expr_str, "((address (postal_code 10021-3100)))") }
+                _ => { println!("Additional address match: {}", expr_str) }
+            }
+            
+            found_expressions.push((path.to_vec(), expr_str));
+            match_index += 1;
+            true // Continue with all matches
+        });
+        
+        assert!(!found_expressions.is_empty(), "Should find some address expressions");
+        
+        // Manually increment weights for testing
+        for (i, (path, expr_str)) in found_expressions.iter().enumerate() {
+            space.increment_expression_count(path, (i + 1) as u64).unwrap();
+            println!("Manually set weight {} for: {}", i + 1, expr_str);
         }
         
-        for (path, weight_data) in weight_progressions {
-            println!("Weight progression for expression '{}':", weight_data[0].1);
-            for i in 1..weight_data.len() {
-                let (prev_weight, _) = &weight_data[i-1];
-                let (curr_weight, expr_str) = &weight_data[i];
-                assert!(curr_weight > prev_weight, 
-                        "Weight should increase with each query: {} -> {} for '{}'", 
-                        prev_weight, curr_weight, expr_str);
-                println!("  ✓ Weight increased from {} to {} for '{}'", 
-                         prev_weight, curr_weight, expr_str);
-            }
-        }
+        // Query again to verify manual weights
+        println!("Query iteration 2 - checking manual weights");
+        let mut match_index = 0;
+        space.query_multi_weighted(&[address_pattern], |_result, expr, weight| {
+            let path = unsafe { expr.span().as_ref().unwrap() };
+            let expr_str = sexpr!(space, expr);
+            println!("  Match {}: {} (weight: {})", match_index, expr_str, weight.local_count);
+            
+            // Verify that weights match our manual increments
+            let expected_weight = (match_index + 1) as u64;
+            assert_eq!(weight.local_count, expected_weight, 
+                      "Weight should be {} for expression: {}", expected_weight, expr_str);
+            
+            match_index += 1;
+            true // Continue with all matches
+        });
+        
+        println!("✓ All manual weight assignments verified successfully");
     }
 }
