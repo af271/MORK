@@ -31,9 +31,7 @@ use commands::*;
 
 mod status_map;
 mod server_space;
-mod weighted_server_space;
 use server_space::*;
-use weighted_server_space::*;
 use mork::{Space, OwnedExpr};
 
 mod resource_store;
@@ -568,19 +566,11 @@ impl Service<Request<IncomingBody>> for MorkService {
             | GET => StopCmd
             | POST => UploadCmd
 
-            // WeightedTriemap Commands
-            | GET => WTCreateCmd
-            | GET => WTAddSExprCmd
-            | GET => WTAddMorkCmd
-            | GET => WTGetTopKCmd
-            | GET => WTGetWeightCmd
-            | GET => WTStatsCmd
 
             | GET => MettaThreadCmd
             | GET => MettaThreadSuspendCmd
             | POST => TransformCmd
         }
-
         #[cfg(feature="neo4j")]
         dispatch!{
             | GET => BusywaitCmd
@@ -599,13 +589,6 @@ impl Service<Request<IncomingBody>> for MorkService {
             | GET => LoadNeo4jNodePropertiesCmd
             | GET => LoadNeo4jNodeLabelsCmd
 
-            // WeightedTriemap Commands
-            | GET => WTCreateCmd
-            | GET => WTAddSExprCmd
-            | GET => WTAddMorkCmd
-            | GET => WTGetTopKCmd
-            | GET => WTGetWeightCmd
-            | GET => WTStatsCmd
 
             | GET => MettaThreadCmd
             | GET => MettaThreadSuspendCmd
