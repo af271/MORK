@@ -1843,3 +1843,108 @@ async fn misbehaving_transform() -> Result<(), ()> {
     println!("{}", String::from_utf8(out).unwrap());
     Ok(())
 }
+
+// ===***===***===***===***===***===***===***===***===***===***===***===***===***===***===***
+// add_expression
+// ===***===***===***===***===***===***===***===***===***===***===***===***===***===***===***
+
+/// Adds an expression to the weighted space with automatic subtree tracking
+pub struct AddExpressionCmd;
+
+impl CommandDefinition for AddExpressionCmd {
+    const NAME: &'static str = "add_expression";
+    const CONST_CMD: &'static Self = &Self;
+    const CONSUME_WORKER: bool = false;
+    
+    fn args() -> &'static [ArgDef] {
+        &[ArgDef{
+            arg_type: ArgType::String,
+            name: "expression",
+            desc: "The s-expression to add to the weighted space",
+            required: true
+        }]
+    }
+    
+    fn properties() -> &'static [PropDef] {
+        &[]
+    }
+    
+    async fn work(ctx: MorkService, cmd: Command, _thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
+        let expr_str = cmd.args[0].as_str();
+        
+        // Add the expression with weight tracking
+        {
+            let mut weighted_space = ctx.0.space.weighted_space.lock()
+                .map_err(|e| CommandError::Internal(format!("Failed to lock weighted space: {}", e).into()))?;
+            weighted_space.add_expression(expr_str)
+                .map_err(|e| CommandError::Internal(format!("Failed to add expression: {}", e).into()))?;
+        }
+        
+        Ok(format!("Successfully added expression: {}", expr_str).into())
+    }
+}
+
+// ===***===***===***===***===***===***===***===***===***===***===***===***===***===***===***
+// query_top_k
+// ===***===***===***===***===***===***===***===***===***===***===***===***===***===***===***
+
+/// Queries the top-k expressions by weight matching a pattern
+pub struct QueryTopKCmd;
+
+impl CommandDefinition for QueryTopKCmd {
+    const NAME: &'static str = "query_top_k";
+    const CONST_CMD: &'static Self = &Self;
+    const CONSUME_WORKER: bool = false;
+    
+    fn args() -> &'static [ArgDef] {
+        &[
+            ArgDef{
+                arg_type: ArgType::String,
+                name: "pattern",
+                desc: "The s-expression pattern to match against",
+                required: true
+            },
+            ArgDef{
+                arg_type: ArgType::UInt,
+                name: "k",
+                desc: "Number of top results to return",
+                required: true
+            }
+        ]
+    }
+    
+    fn properties() -> &'static [PropDef] {
+        &[]
+    }
+    
+    async fn work(ctx: MorkService, cmd: Command, _thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
+        let pattern_str = cmd.args[0].as_str();
+        let k = cmd.args[1].as_u64() as usize;
+        
+        // Access the weighted space (read-only)
+        let weighted_space = ctx.0.space.weighted_space.lock()
+            .map_err(|e| CommandError::Internal(format!("Failed to lock weighted space: {}", e).into()))?;
+        
+        // Parse the pattern expression
+        let pattern = weighted_space.sexpr_to_expr(pattern_str)
+            .map_err(|e| CommandError::Internal(format!("Failed to parse pattern: {:?}", e).into()))?;
+        
+        // Query top-k expressions
+        let results = weighted_space.query_top_k(pattern.borrow(), k);
+        
+        // Format the results
+        let mut response = format!("Top {} results for pattern '{}':\n", k, pattern_str);
+        for (i, (expr, weight)) in results.iter().enumerate() {
+            // Convert expression back to string representation - we'll use a simple approach
+            let expr_bytes = unsafe { expr.span().as_ref().unwrap() };
+            let expr_str = String::from_utf8_lossy(expr_bytes);
+            response.push_str(&format!("{}. {} (weight: {})\n", i + 1, expr_str, weight.local_count));
+        }
+        
+        if results.is_empty() {
+            response.push_str("No results found.\n");
+        }
+        
+        Ok(response.into())
+    }
+}

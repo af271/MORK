@@ -9,6 +9,7 @@ use pathmap::zipper_tracking::Conflict;
 use pathmap::zipper::*;
 
 use mork::{PermissionArb, PathPermissionErr, Space, SpaceReaderZipper, SpaceWriterZipper};
+use mork::weighted_space::WeightedSpace;
 
 use crate::status_map::*;
 use crate::commands::*;
@@ -25,6 +26,8 @@ pub struct ServerSpace {
     pub(crate) status_map: StatusMap,
     /// Guard to ensure high-level operations can be atomic
     permission_guard: Mutex<()>,
+    /// Weighted space for expression frequency tracking
+    pub weighted_space: Mutex<WeightedSpace>,
 }
 
 /// PermissionHead object for [ServerSpace]
@@ -46,12 +49,16 @@ impl ServerSpace {
         // init symbol table
         //GOAT, Load this from the snapshot
         let global_symbol_table = bucket_map::SharedMapping::new();
+        
+        // Initialize weighted space
+        let weighted_space = Mutex::new(WeightedSpace::new());
 
         Self {
             global_symbol_table,
             primary_map,
             status_map: status_map,
             permission_guard: Mutex::new(()),
+            weighted_space,
         }
     }
     pub fn get_status<P: AsRef<[u8]>>(&self, path: P) -> StatusRecord {
