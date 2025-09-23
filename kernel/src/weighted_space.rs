@@ -71,17 +71,9 @@ impl WeightedSpace {
         subtrees
     }
 
-    /// Creates a new weighted space with specified top-k tracking
-    pub fn new_with_k(k: usize) -> Self {
-        Self {
-            base_space: DefaultSpace::new(),
-            weights: Arc::new(Mutex::new(WeightedTriemap::new_with_k(k))),
-        }
-    }
-
     /// Query with weight information included in results
     /// This method provides access to existing weights without modifying them
-    pub fn query_multi_weighted<F>(&self, patterns: &[Expr], mut effect: F) -> usize 
+    pub fn query_multi<F>(&self, patterns: &[Expr], mut effect: F) -> usize 
     where 
         F: FnMut(Result<&[ExprEnv], (BTreeMap<(u8, u8), ExprEnv>, u8, u8, &[(u8, u8)])>, Expr, NodeWeight) -> bool,
     {
@@ -91,11 +83,11 @@ impl WeightedSpace {
             // Convert expression to string representation and remove extra wrapper parentheses
             let mut expr_buffer = Vec::new();
             let weight = if let Ok(()) = serialize_sexpr_into(expr.ptr, &mut expr_buffer, self.base_space.symbol_table()) {
-                // Remove first and last byte (the extra parentheses) to match add_expression_weighted format
+                // Remove first and last byte (the extra parentheses) to match add_expression format
                 if expr_buffer.len() >= 2 && expr_buffer[0] == b'(' && expr_buffer[expr_buffer.len()-1] == b')' {
                     let trimmed_bytes = &expr_buffer[1..expr_buffer.len()-1];
                     let weights_guard = weights_ref.lock().unwrap();
-                    weights_guard.get_weight_copy(trimmed_bytes).unwrap_or_default()
+                    weights_guard.get_weight(trimmed_bytes).unwrap_or_default()
                 } else {
                     NodeWeight::default()
                 }
@@ -110,7 +102,7 @@ impl WeightedSpace {
 
     /// Add an expression with weight tracking
     /// This increments the local_count by 1 for the expression and all its subtrees
-    pub fn add_expression_weighted(&mut self, expr_str: &str) -> Result<(), String> {       
+    pub fn add_expression(&mut self, expr_str: &str) -> Result<(), String> {       
         let pattern_expr = expr!(self.base_space, "$");
         let metadata_expr = expr!(self.base_space, "_1");
 
@@ -142,7 +134,7 @@ impl WeightedSpace {
     /// Get weight information for a specific expression
     pub fn get_expression_weight(&self, expr: &[u8]) -> Option<NodeWeight> {
         let weights = self.weights.lock().unwrap();
-        weights.get_weight_copy(expr)
+        weights.get_weight(expr)
     }
 
     /// Query expressions matching a pattern and return the top-k by weight
@@ -151,7 +143,7 @@ impl WeightedSpace {
         let mut weighted_results = Vec::new();
         
         // Collect all matching expressions with their weights
-        self.query_multi_weighted(&[pattern], |_result, expr, weight| {
+        self.query_multi(&[pattern], |_result, expr, weight| {
             if weight.local_count > 0 {
                 weighted_results.push((expr, weight));
             }
@@ -211,12 +203,12 @@ mod tests {
     }
 
     #[test]
-    fn test_add_expression_weighted() {
+    fn test_add_expression() {
         let mut space = WeightedSpace::new();
         
         // Test adding a simple expression
         let expr_str = "(+ a b)";
-        space.add_expression_weighted(expr_str).unwrap();
+        space.add_expression(expr_str).unwrap();
         
         // Test that it was added successfully
     }
@@ -246,7 +238,7 @@ mod tests {
         
         // Add a complex expression that should generate subtrees
         let expr_str = "(f (g a b) (h c))";
-        space.add_expression_weighted(expr_str).unwrap();
+        space.add_expression(expr_str).unwrap();
         
         // Check that the main expression has weight 1
         let main_weight = space.get_expression_weight(expr_str.as_bytes());
@@ -263,7 +255,7 @@ mod tests {
         assert_eq!(subtree2_weight.unwrap().local_count, 1);
         
         // Add the same expression again - all weights should increment
-        space.add_expression_weighted(expr_str).unwrap();
+        space.add_expression(expr_str).unwrap();
         
         // Check that all weights are now 2
         let main_weight2 = space.get_expression_weight(expr_str.as_bytes());
@@ -277,10 +269,10 @@ mod tests {
     }
     
     #[test]
-    fn test_weighted_queries() {
+    fn test_queries() {
         let mut space = WeightedSpace::new();
         
-        // Add expressions individually using add_expression_weighted
+        // Add expressions individually using add_expression
         // Each expression gets added a different number of times to create different weights
         
         // Add some expressions multiple times
@@ -298,7 +290,7 @@ mod tests {
         // Add each expression the specified number of times
         for (expr_str, &count) in expressions.iter().zip(add_counts.iter()) {
             for i in 0..count {
-                space.add_expression_weighted(expr_str).unwrap();
+                space.add_expression(expr_str).unwrap();
             }
         }
         
@@ -307,7 +299,7 @@ mod tests {
         
         let mut found_children = Vec::new();
         let mut match_index = 0;
-        let query_count = space.query_multi_weighted(&[children_pattern], |_result, expr, weight| {
+        let query_count = space.query_multi(&[children_pattern], |_result, expr, weight| {
             let path = unsafe { expr.span().as_ref().unwrap() };
             let expr_str = sexpr!(space, expr);
             
@@ -353,7 +345,7 @@ mod tests {
         // Add each expression the specified number of times
         for (expr_str, &count) in expressions.iter().zip(add_counts.iter()) {
             for _ in 0..count {
-                space.add_expression_weighted(expr_str).unwrap();
+                space.add_expression(expr_str).unwrap();
             }
         }
         
