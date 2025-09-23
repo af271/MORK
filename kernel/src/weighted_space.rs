@@ -1,14 +1,13 @@
 use std::sync::{Arc, Mutex};
 use std::collections::BTreeMap;
 use std::ops::Deref;
-use std::io::BufRead;
 
 use crate::space::DefaultSpace;
 use crate::{expr, sexpr};
 use crate::space_temporary::Space;
 use crate::space::serialize_sexpr_into;
 use pathmap::weighted_trie::{WeightedTriemap, NodeWeight};
-use mork_bytestring::{Expr, ExprEnv, ExprTrait};
+use mork_bytestring::{Expr, ExprEnv};
 
 
 /// A weighted extension of DefaultSpace that tracks expression counts and weights
@@ -85,7 +84,7 @@ impl WeightedSpace {
         // Increment weight using the expression string as path
         {
             let mut weights = self.weights.lock().unwrap();
-            weights.increment_count(expr_str.as_bytes(), 1)?;
+            weights.increment_count(expr_str.as_bytes());
         }
         
         Ok(())
@@ -136,7 +135,6 @@ impl std::ops::DerefMut for WeightedSpace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mork_bytestring::Tag;
 
     // Real test data similar to lib.rs
     const SEXPRS: &str = r#"(first_name John)
