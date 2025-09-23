@@ -34,6 +34,43 @@ impl WeightedSpace {
         }
     }
 
+    /// Extracts all subtrees from an s-expression string
+    pub fn extract_subtrees(input: &str) -> Vec<String> {
+        let mut subtrees = Vec::new();
+        let mut stack = Vec::new();
+        let mut in_string = false;
+        let mut escape_next = false;
+        
+        let chars: Vec<char> = input.chars().collect();
+        
+        for (i, &c) in chars.iter().enumerate() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            
+            match c {
+                '\\' if in_string => escape_next = true,
+                '"' => in_string = !in_string,
+                '(' if !in_string => {
+                    stack.push(i);
+                }
+                ')' if !in_string => {
+                    if let Some(start) = stack.pop() {
+                        let subtree = chars[start..=i].iter().collect::<String>();
+                        subtrees.push(subtree);
+                    }
+                }
+                _ => {}
+            }
+        }
+        
+        // Remove duplicates and sort
+        subtrees.sort();
+        subtrees.dedup();
+        subtrees
+    }
+
     /// Creates a new weighted space with specified top-k tracking
     pub fn new_with_k(k: usize) -> Self {
         Self {
@@ -72,19 +109,31 @@ impl WeightedSpace {
     }
 
     /// Add an expression with weight tracking
-    /// This increments the local_count by 1 for the expression
+    /// This increments the local_count by 1 for the expression and all its subtrees
     pub fn add_expression_weighted(&mut self, expr_str: &str) -> Result<(), String> {       
         let pattern_expr = expr!(self.base_space, "$");
         let metadata_expr = expr!(self.base_space, "_1");
 
         // Load the expression
-        let loaded_count = self.base_space.load_sexpr_simple(expr_str.as_bytes(), pattern_expr, metadata_expr)
+        let _loaded_count = self.base_space.load_sexpr_simple(expr_str.as_bytes(), pattern_expr, metadata_expr)
             .map_err(|e| format!("Failed to load expression: {}", e))?;
         
-        // Increment weight using the expression string as path
+        // Extract all subtrees from the expression
+        let subtrees = Self::extract_subtrees(expr_str);
+        
+        // Increment weight for the main expression and all subtrees (but avoid double counting)
         {
             let mut weights = self.weights.lock().unwrap();
+            
+            // Increment the main expression
             weights.increment_count(expr_str.as_bytes());
+            
+            // Increment subtrees that are different from the main expression
+            for subtree in subtrees {
+                if subtree != expr_str {
+                    weights.increment_count(subtree.as_bytes());
+                }
+            }
         }
         
         Ok(())
@@ -170,6 +219,61 @@ mod tests {
         space.add_expression_weighted(expr_str).unwrap();
         
         // Test that it was added successfully
+    }
+
+    #[test]
+    fn test_extract_subtrees() {
+        let input = "(f (g a b) (h c))";
+        let subtrees = WeightedSpace::extract_subtrees(input);
+        
+        // Should extract all complete s-expressions
+        let expected = vec![
+            "(f (g a b) (h c))".to_string(),
+            "(g a b)".to_string(),
+            "(h c)".to_string()
+        ];
+        
+        assert_eq!(subtrees.len(), 3);
+        for expected_subtree in expected {
+            assert!(subtrees.contains(&expected_subtree), 
+                   "Should contain subtree: {}", expected_subtree);
+        }
+    }
+
+    #[test] 
+    fn test_add_expression_with_subtrees() {
+        let mut space = WeightedSpace::new();
+        
+        // Add a complex expression that should generate subtrees
+        let expr_str = "(f (g a b) (h c))";
+        space.add_expression_weighted(expr_str).unwrap();
+        
+        // Check that the main expression has weight 1
+        let main_weight = space.get_expression_weight(expr_str.as_bytes());
+        assert!(main_weight.is_some());
+        assert_eq!(main_weight.unwrap().local_count, 1);
+        
+        // Check that subtrees also have weight 1
+        let subtree1_weight = space.get_expression_weight(b"(g a b)");
+        assert!(subtree1_weight.is_some());
+        assert_eq!(subtree1_weight.unwrap().local_count, 1);
+        
+        let subtree2_weight = space.get_expression_weight(b"(h c)");
+        assert!(subtree2_weight.is_some());
+        assert_eq!(subtree2_weight.unwrap().local_count, 1);
+        
+        // Add the same expression again - all weights should increment
+        space.add_expression_weighted(expr_str).unwrap();
+        
+        // Check that all weights are now 2
+        let main_weight2 = space.get_expression_weight(expr_str.as_bytes());
+        assert_eq!(main_weight2.unwrap().local_count, 2);
+        
+        let subtree1_weight2 = space.get_expression_weight(b"(g a b)");
+        assert_eq!(subtree1_weight2.unwrap().local_count, 2);
+        
+        let subtree2_weight2 = space.get_expression_weight(b"(h c)");
+        assert_eq!(subtree2_weight2.unwrap().local_count, 2);
     }
     
     #[test]
