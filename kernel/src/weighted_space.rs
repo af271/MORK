@@ -97,15 +97,24 @@ impl WeightedSpace {
         weights.get_weight_copy(expr)
     }
 
-    /// Get top-k most frequent expressions overall
-    pub fn get_top_k_expressions(&self, k: usize) -> Vec<WeightedQueryResult> {
-        let weights = self.weights.lock().unwrap();
-        weights.get_top_k_paths(k).into_iter().map(|(path, weight)| {
-            WeightedQueryResult {
-                expression: path,
-                weight,
+    /// Query expressions matching a pattern and return the top-k by weight
+    /// This combines pattern matching with weight-based ranking
+    pub fn query_top_k(&self, pattern: Expr, k: usize) -> Vec<(Expr, NodeWeight)> {
+        let mut weighted_results = Vec::new();
+        
+        // Collect all matching expressions with their weights
+        self.query_multi_weighted(&[pattern], |_result, expr, weight| {
+            if weight.local_count > 0 {
+                weighted_results.push((expr, weight));
             }
-        }).collect()
+            true // Continue collecting all results
+        });
+        
+        // Sort by weight (highest first) and take top k
+        weighted_results.sort_by(|a, b| b.1.local_count.partial_cmp(&a.1.local_count).unwrap_or(std::cmp::Ordering::Equal));
+        weighted_results.truncate(k);
+        
+        weighted_results
     }
 }
 
@@ -222,22 +231,52 @@ mod tests {
         });
 
         assert_eq!(query_count, 3, "Should find exactly 3 children");
-                        
-        // Test top-k functionality
-        let top_expressions = space.get_top_k_expressions(3);
-        println!("Top {} expressions by weight:", top_expressions.len());
-        for (i, result) in top_expressions.iter().enumerate() {
-            println!("  {}. Weight: {}", 
-                     i + 1,
-                     result.weight.local_count);
+    }
+
+    #[test]
+    fn test_query_top_k() {
+        let mut space = WeightedSpace::new();
+        
+        // Add different children expressions with varying frequencies
+        let expressions = [
+            "(children (name Alice))",     // Will be added 1 time  -> weight = 1
+            "(children (name Bob))",       // Will be added 3 times -> weight = 3
+            "(age 27)",                    // Will be added 13 times -> weight = 13  
+            "(children (name Charlie))",   // Will be added 2 times -> weight = 2
+            "(children (name David))",     // Will be added 5 times -> weight = 5
+        ];
+        
+        let add_counts = [1, 3, 13, 2, 5];
+        
+        // Add each expression the specified number of times
+        for (expr_str, &count) in expressions.iter().zip(add_counts.iter()) {
+            for _ in 0..count {
+                space.add_expression_weighted(expr_str).unwrap();
+            }
         }
         
-        // Verify that age (weight=5) should be the highest
-        if !top_expressions.is_empty() {
-            let highest_weight = top_expressions[0].weight.local_count;
-            println!("Highest weight found: {}", highest_weight);
-        }
+        // Test query_top_k with a pattern that matches all children
+        let children_pattern = expr!(space, "[2] children [2] $ $");
+        let top_2_children = space.query_top_k(children_pattern, 2);
         
-        println!("All weight tracking verified successfully");
+        // Should return top 2 by weight: David (5) and Bob (3)
+        assert_eq!(top_2_children.len(), 2, "Should return exactly 2 results");
+        
+        // Verify the highest weight is David with weight 5
+        assert_eq!(top_2_children[0].1.local_count, 5, "Highest should be David with weight 5");
+        
+        // Verify the second highest weight is Bob with weight 3
+        assert_eq!(top_2_children[1].1.local_count, 3, "Second should be Bob with weight 3");
+        
+        // Test with k larger than available results
+        let top_10_children = space.query_top_k(children_pattern, 10);
+        assert_eq!(top_10_children.len(), 4, "Should return all 4 available results when k > available");
+        
+        // Verify the ordering: David(5), Bob(3), Charlie(2), Alice(1)
+        let expected_weights = [5, 3, 2, 1];
+        for (i, expected_weight) in expected_weights.iter().enumerate() {
+            assert_eq!(top_10_children[i].1.local_count, *expected_weight, 
+                      "Result {} should have weight {}", i, expected_weight);
+        }
     }
 }
