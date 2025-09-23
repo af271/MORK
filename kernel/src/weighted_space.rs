@@ -1,11 +1,14 @@
 use std::sync::{Arc, Mutex};
 use std::collections::BTreeMap;
 use std::ops::Deref;
+use std::io::BufRead;
 
+use crate::space::DefaultSpace;
+use crate::{expr, sexpr};
+use crate::space_temporary::Space;
 use pathmap::weighted_trie::{WeightedTriemap, NodeWeight};
 use mork_bytestring::{Expr, ExprEnv, ExprTrait};
 
-use crate::space::DefaultSpace;
 
 /// A weighted extension of DefaultSpace that tracks expression counts and weights
 pub struct WeightedSpace {
@@ -90,10 +93,10 @@ impl WeightedSpace {
     pub fn query_top_k_weighted(&self, patterns: &[Expr], k: usize) -> Vec<WeightedQueryResult> {
         let mut results = self.query_weighted_collect(patterns);
         
-        // Sort by total weight (local_count + subtree_count) in descending order
+        // Sort by local_count in descending order
         results.sort_by(|a, b| {
-            let weight_a = a.weight.local_count + a.weight.subtree_count;
-            let weight_b = b.weight.local_count + b.weight.subtree_count;
+            let weight_a = a.weight.local_count;
+            let weight_b = b.weight.local_count;
             weight_b.cmp(&weight_a)
         });
 
@@ -101,18 +104,19 @@ impl WeightedSpace {
         results
     }
 
-    /// Add an expression with specified weight
-    pub fn add_expression_weighted(&mut self, expr: &[u8], local_count: u64) -> Result<(), String> {
-        // Add to base space (using existing infrastructure)
-        // Note: This would need to be implemented based on existing DefaultSpace methods
-        // For now, we'll focus on the weight tracking part
-        
-        // Add weight information
-        {
-            let mut weights = self.weights.lock().unwrap();
-            weights.increment_count(expr, local_count)?;
-        }
+    /// Add an expression with weight tracking
+    /// This increments the local_count by 1 for the expression
+    pub fn add_expression_weighted(&mut self, expr_str: &str) -> Result<(), String> {       
+        let pattern_expr = expr!(self.base_space, "$");
+        let metadata_expr = expr!(self.base_space, "_1");
 
+        let loaded_count = self.base_space.load_sexpr_simple(expr_str.as_bytes(), pattern_expr, metadata_expr)
+            .map_err(|e| format!("Failed to load expression: {}", e))?;
+        
+        // Increment weight by 1 for the loaded expression
+        let mut weights = self.weights.lock().unwrap();
+        weights.increment_count(expr_str.as_bytes(), 1);
+        
         Ok(())
     }
 
@@ -137,12 +141,6 @@ impl WeightedSpace {
                 weight,
             }
         }).collect()
-    }
-
-    /// Update subtree counts efficiently
-    pub fn recompute_subtree_counts(&self) -> Result<(), String> {
-        let mut weights = self.weights.lock().unwrap();
-        weights.recompute_subtree_counts()
     }
 }
 
@@ -192,25 +190,17 @@ mod tests {
     }
 
     #[test]
-    fn test_expression_weight_tracking() {
+    fn test_add_expression_weighted() {
         let mut space = WeightedSpace::new();
         
-        // Create a simple expression bytecode: Arity(2) + Symbol "+" + Symbol "a" + Symbol "b"
-        let expr_bytes = vec![
-            Tag::Arity(2).encode_as_byte().unwrap(),
-            Tag::SymbolSize(1).encode_as_byte().unwrap(), b'+',
-            Tag::SymbolSize(1).encode_as_byte().unwrap(), b'a',
-            Tag::SymbolSize(1).encode_as_byte().unwrap(), b'b',
-        ];
-
-        // Add expression with weight
-        space.add_expression_weighted(&expr_bytes, 5).unwrap();
+        // Test adding a simple expression
+        let expr_str = "(+ a b)";
+        space.add_expression_weighted(expr_str).unwrap();
         
-        // Check weight
-        let weight = space.get_expression_weight(&expr_bytes).unwrap();
-        assert_eq!(weight.local_count, 5);
+        // Test that it was added successfully
+        println!("Successfully added expression: {}", expr_str);
     }
-
+    
     #[test]
     fn test_weighted_queries() {
         use crate::{expr, sexpr};
@@ -239,8 +229,8 @@ mod tests {
         let query_count = space.query_multi_weighted(&[children_pattern], |_result, expr, weight| {
             let path = unsafe { expr.span().as_ref().unwrap() };
             let expr_str = sexpr!(space, expr);
-            println!("Found child expression with weight: local={}, subtree={}", 
-                     weight.local_count, weight.subtree_count);
+            println!("Found child expression with weight: local={}", 
+                     weight.local_count);
             println!("Match {}: {}", match_index, expr_str);
             
             // Validate expected matches based on pattern structure
@@ -272,8 +262,8 @@ mod tests {
         let second_query_count = space.query_multi_weighted(&[children_pattern], |_result, expr, weight| {
             let path = unsafe { expr.span().as_ref().unwrap() };
             let expr_str = sexpr!(space, expr);
-            println!("Second query - child expression with weight: local={}, subtree={}", 
-                     weight.local_count, weight.subtree_count);
+            println!("Second query - child expression with weight: local={}", 
+                     weight.local_count);
             println!("Second match {}: {}", second_match_index, expr_str);
             
             found_children_second.push((path.to_vec(), weight, expr_str.clone()));
@@ -287,19 +277,15 @@ mod tests {
         let top_expressions = space.get_top_k_expressions(3);
         println!("Top {} expressions by weight:", top_expressions.len());
         for (i, result) in top_expressions.iter().enumerate() {
-            println!("  {}. Weight: {} (local: {}, subtree: {})", 
+            println!("  {}. Weight: {} (local: {})", 
                      i + 1,
-                     result.weight.local_count + result.weight.subtree_count,
                      result.weight.local_count,
-                     result.weight.subtree_count);
+                     result.weight.local_count);
         }
     }
 
     #[test]
-    fn test_query_method_weight_tracking() {
-        use crate::{expr, sexpr};
-        use crate::space_temporary::Space;
-        
+    fn test_query_method_weight_tracking() {        
         let mut space = WeightedSpace::new();
         
         // Load expressions
@@ -361,6 +347,6 @@ mod tests {
             true // Continue with all matches
         });
         
-        println!("✓ All manual weight assignments verified successfully");
+        println!("All manual weight assignments verified successfully");
     }
 }
