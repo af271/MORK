@@ -730,8 +730,33 @@ fn do_parse<SrcStream: Read + BufRead>(space: &ServerSpace, src: SrcStream, patt
     let template_expr = template.borrow();
     match file_type {
         DataFormat::Metta => {
-            let count = space.load_sexpr(src, pattern_expr, template_expr, writer).map_err(|e| CommandError::external(StatusCode::BAD_REQUEST, format!("{e:?}")))?;
-            println!("Loaded {count} atoms from MeTTa S-Expr");
+            // Use load_sexpr_impl directly to get per-expression callback
+            let mut expression_count = 0;
+            let count = mork::space::load_sexpr_impl(
+                space.symbol_table(),
+                src,
+                pattern_expr,
+                template_expr,
+                space.write_zipper(writer),
+                Some(|expr_bytes: &[u8]| {
+                    expression_count += 1;
+                    println!("📥 Expression #{}: Parsed {} bytes", expression_count, expr_bytes.len());
+                    
+                    // Convert bytes to string for display (safely)
+                    let expr_str = mork_bytestring::serialize(expr_bytes);
+                    println!("   Content: {}", expr_str);
+                    
+                    // Track weight for each individual expression
+                    if let Ok(mut weighted_space) = space.weighted_space.lock() {
+                        if let Err(e) = weighted_space.track_expression(&expr_str) {
+                            eprintln!("⚠️  Failed to track expression weight: {}", e);
+                        } else {
+                            println!("📊 Weight tracked for expression");
+                        }
+                    }
+                })
+            ).map_err(|e| CommandError::external(StatusCode::BAD_REQUEST, format!("{e:?}")))?;
+            println!("🎉 Loaded {count} atoms from MeTTa S-Expr");
         },
         DataFormat::Json => {
             unimplemented!();//GOAT

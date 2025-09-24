@@ -1401,16 +1401,18 @@ impl DefaultSpace {
         self.load_sexpr(src, pattern, template, &mut writer).map_err(|e| format!("{:?}", e))
     }
 }
-pub(crate) fn load_sexpr_impl<'s, SrcStream, WZ>(
+pub fn load_sexpr_impl<'s, SrcStream, WZ, F>(
     sm       : &SharedMappingHandle,
     src      : SrcStream,
     pattern  : Expr,
     template : Expr,
     mut wz   : WZ,
+    mut on_expression_added: Option<F>,
 ) -> Result<usize, ParserError>
 where
         WZ : Zipper + ZipperMoving + ZipperWriting<()> /* + ZipperAbsolutePath */ + 's,
         SrcStream: BufRead,
+        F: FnMut(&[u8]),
 {
         let constant_template_prefix = unsafe { template.prefix().unwrap_or_else(|_| template.span()).as_ref().unwrap() };
         // core::debug_assert_eq!(wz.origin_path().unwrap(), constant_template_prefix);
@@ -1433,6 +1435,12 @@ where
                     let new_data = unsafe { slice_from_raw_parts(buffer.as_ptr(), oz.loc).as_ref().unwrap() };
                     wz.descend_to(&new_data[constant_template_prefix.len()..]);
                     wz.set_val(());
+                    
+                    // Call callback for each successfully added expression
+                    if let Some(ref mut callback) = on_expression_added {
+                        callback(new_data);
+                    }
+                    
                     wz.reset();
                 }
                 Err(mut err) => {

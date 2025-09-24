@@ -13,6 +13,7 @@ use mork::weighted_space::WeightedSpace;
 
 use crate::status_map::*;
 use crate::commands::*;
+use crate::weighted_space::ServerWeightedSpace;
 
 /// The time to wait before rejecting a request with a conflicted path
 const SETTLE_TIME: Duration = Duration::from_millis(5);
@@ -27,7 +28,7 @@ pub struct ServerSpace {
     /// Guard to ensure high-level operations can be atomic
     permission_guard: Mutex<()>,
     /// Weighted space for expression frequency tracking
-    pub weighted_space: Mutex<WeightedSpace>,
+    pub weighted_space: Mutex<ServerWeightedSpace>,
 }
 
 /// PermissionHead object for [ServerSpace]
@@ -51,7 +52,7 @@ impl ServerSpace {
         let global_symbol_table = bucket_map::SharedMapping::new();
         
         // Initialize weighted space
-        let weighted_space = Mutex::new(WeightedSpace::new());
+        let weighted_space = Mutex::new(ServerWeightedSpace::new());
 
         Self {
             global_symbol_table,

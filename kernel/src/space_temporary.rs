@@ -161,7 +161,8 @@ pub trait Space: Sized {
             src_data,
             pattern,
             template,
-            self.write_zipper(template_writer)
+            self.write_zipper(template_writer),
+            None::<fn(&[u8])>  // No callback for standard load_sexpr
         ).map_err(|e|ParseError(format!("{e:?}")))
     }
 
