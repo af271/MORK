@@ -573,7 +573,7 @@ impl Service<Request<IncomingBody>> for MorkService {
             
             // Weighted space commands
             | POST => AddExpressionCmd
-            | GET => QueryTopKCmd
+            | GET => ExportWeightedCmd
         }
         #[cfg(feature="neo4j")]
         dispatch!{
@@ -600,7 +600,7 @@ impl Service<Request<IncomingBody>> for MorkService {
             
             // Weighted space commands
             | POST => AddExpressionCmd
-            | GET => QueryTopKCmd
+            | GET => ExportWeightedCmd
         }
     }
 }

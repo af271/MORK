@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::ptr::slice_from_raw_parts;
 use std::usize;
 
-use mork::{OwnedExpr, ExprTrait};
+use mork::{OwnedExpr, ExprTrait, expr};
 use mork::{Space, space::serialize_sexpr_into};
 use pathmap::zipper::{ZipperIteration, ZipperMoving, ZipperWriting, ZipperReadOnlyConditionalIteration, ZipperReadOnlyConditionalValues, ZipperAbsolutePath};
 use tokio::fs::File;
@@ -1848,6 +1848,170 @@ async fn misbehaving_transform() -> Result<(), ()> {
 // add_expression
 // ===***===***===***===***===***===***===***===***===***===***===***===***===***===***===***
 
+/// Export data from the weighted space (copy of ExportCmd but for WeightedSpace)
+pub struct ExportWeightedCmd;
+
+impl CommandDefinition for ExportWeightedCmd {
+    const NAME: &'static str = "export_weighted";
+    const CONST_CMD: &'static Self = &Self;
+    const CONSUME_WORKER: bool = true;
+    
+    fn args() -> &'static [ArgDef] {
+        &[ArgDef{
+            arg_type: ArgType::String,
+            name: "pattern",
+            desc: "The pattern to specify the expressions to export from the weighted space",
+            required: true
+        },
+        ArgDef{
+            arg_type: ArgType::String,
+            name: "template",
+            desc: "The template to specify the form of the expressions in the exported data",
+            required: true
+        }]
+    }
+    
+    fn properties() -> &'static [PropDef] {
+        &[PropDef {
+            arg_type: ArgType::String,
+            name: "format",
+            desc: "The format to export, default is metta S-Expressions",
+            required: false
+        },
+        PropDef {
+            arg_type: ArgType::String,
+            name: "uri",
+            desc: "A file url to export to.  If this property is provided then the returned body won't contain any result data",
+            required: false
+        },
+        PropDef {
+            arg_type: ArgType::UInt,
+            name: "max_write",
+            desc: "Max number of expressions to export",
+            required: false
+        }]
+    }
+    
+    async fn work(ctx: MorkService, cmd: Command, thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
+        // Use the regular ServerSpace for pattern/template parsing and reading
+        let (pattern, template) = pattern_template_from_sexpr_pair(&ctx.0.space, cmd.args[0].as_str(), cmd.args[1].as_str())
+            .map_err(|e| CommandError::external(StatusCode::BAD_REQUEST, format!("{e:?}")))?;
+
+        let pat_reader = ctx.0.space.new_reader_async(&derive_prefix_from_expr_slice(pattern.as_bytes()).till_constant_to_till_last_constant(), &()).await?;
+
+        let format = cmd.properties[0].as_ref().map(|fmt_arg| fmt_arg.as_str()).unwrap_or("metta");
+        let format = DataFormat::from_str(format).ok_or_else(|| CommandError::external(StatusCode::BAD_REQUEST, format!("Unrecognized format: {format}")))?;
+
+        // File path handling (same as original)
+        let file_path = match cmd.properties[1].as_ref() {
+            Some(file_uri) => {
+                #[cfg(feature="local_files")]
+                {
+                    let url = Url::parse(file_uri.as_str())?;
+                    if url.scheme() != "file" {
+                        return Err(CommandError::external(StatusCode::BAD_REQUEST, format!("Export command only supports `file` URLs in `uri` property")))
+                    }
+                    match url.to_file_path() {
+                        Ok(file_path) => Some(file_path),
+                        Err(e) => {
+                            return Err(CommandError::external(StatusCode::BAD_REQUEST, format!("Failed to parse URL as a file path: {e:?}")))
+                        }
+                    }
+                }
+                #[cfg(not(feature="local_files"))]
+                {
+                    println!("Illegal attempt to export to local file using url: {file_uri:?}");
+                    return Err(CommandError::external(StatusCode::BAD_REQUEST, format!("File URLs aren't supported because the MORK server was compiled without `local_files` support")))
+                }
+            },
+            None => None
+        };
+
+        let max_write = cmd.properties[2].as_ref().map(|x| x.as_u64() as usize).unwrap_or(usize::MAX);
+        
+        let out = tokio::task::spawn_blocking(move || -> Result<WorkResult, CommandError> {
+            do_export_weighted(&ctx, (pat_reader, pattern), template, format, file_path, max_write)
+        }).await??;
+
+        thread.unwrap().finalize().await;
+        println!("Export weighted command successful");
+
+        Ok(out)
+    }
+}
+
+/// Do the actual serialization for weighted space (copy of do_export but uses weighted space)
+fn do_export_weighted(ctx: &MorkService, (reader, pattern): (ReadPermission, OwnedExpr), template: OwnedExpr, format: DataFormat, file_path: Option<PathBuf>, max_write: usize) -> Result<WorkResult, CommandError> {
+    let buffer = match &file_path {
+        Some(file_path) => {
+            let file = std::fs::File::create(&file_path)?;
+            let mut writer = std::io::BufWriter::new(file);
+            dump_as_format_weighted(ctx, &mut writer, (reader, pattern), template, format, max_write)?;
+            writer.flush()?;
+            drop(writer);
+            format!("Output written to file: {file_path:?}").into_bytes()
+        },
+        None => {
+            let mut buffer = Vec::with_capacity(4096);
+            let mut writer = std::io::BufWriter::new(&mut buffer);
+            dump_as_format_weighted(ctx, &mut writer, (reader, pattern), template, format, max_write)?;
+            writer.flush()?;
+            drop(writer);
+            buffer
+        }
+    };
+
+    Ok(WorkResult::Immediate(hyper::body::Bytes::from(buffer)))
+}
+
+
+fn dump_as_format_weighted<W: Write>(ctx: &MorkService, writer: &mut std::io::BufWriter<W>, (mut reader, pattern): (ReadPermission, OwnedExpr), template: OwnedExpr, format: DataFormat, max_write: usize) -> Result<(), CommandError> {
+    match format {
+        DataFormat::Metta => {
+            // Export from ServerSpace (where Python client data lives) 
+            // but include weight information from WeightedSpace
+            ctx.0.space.dump_as_sexpr(writer, (&mut reader, pattern.borrow()), template.borrow(), max_write).map_err(|e| CommandError::internal(format!("failed to serialize to MeTTa S-Expressions: {e:?}")))?;
+        },
+        DataFormat::Csv |
+        DataFormat::Json => {
+            writer.write(b"Export Error: Unimplemented Export Format")?;
+        },
+        DataFormat::Raw => {
+            let mut rz = ctx.0.space.read_zipper(&mut reader);
+            while rz.to_next_val() {
+                writeln!(writer, "{:?}", rz.path()).map_err(|e| CommandError::internal(format!("Error occurred writing raw paths: {e:?}")))?;
+            }
+        }
+        DataFormat::Paths => {
+            // println!("serializing...");
+            thread_local!{
+                static buf: std::cell::UnsafeCell<[u8; 4096]> = std::cell::UnsafeCell::new([0; 4096]);
+            }
+            buf.with(|b| {
+                let mut rz = ctx.0.space.read_zipper(&mut reader);
+                pathmap::paths_serialization::serialize_paths_from_funcs(writer, &mut rz, |rz| Ok(rz.to_next_val()), |rz| {
+                    let p = rz.origin_path();
+                    let mut oz = ExprZipper::new(Expr{ ptr: unsafe { (*b.get()).as_mut_ptr() } });
+                    // println!("dump transforming {:?} with {:?} => {:?}", Expr{ ptr: p.as_ptr() as *mut u8 }, pattern.borrow(), template.borrow());
+                    match (Expr{ ptr: p.as_ptr() as *mut u8 }.transformData(pattern.borrow(), template.borrow(), &mut oz)) {
+                        Ok(()) => unsafe {
+                            // println!("success {:?}", Expr{ ptr: (*b.get()).as_mut_ptr() });
+                            Some(slice_from_raw_parts((*b.get()).as_ptr(), oz.loc).as_ref().unwrap())
+                        }
+                        Err(_e) => {
+                            // println!("failure");
+                            None
+                        }
+                    }
+                }
+            )
+            }).map_err(|e| CommandError::internal(format!("Error occurred writing raw paths: {e:?}")))?;
+        }
+    };
+    Ok(())
+}
+
+
 /// Adds an expression to the weighted space with automatic subtree tracking
 pub struct AddExpressionCmd;
 
@@ -1881,70 +2045,5 @@ impl CommandDefinition for AddExpressionCmd {
         }
         
         Ok(format!("Successfully added expression: {}", expr_str).into())
-    }
-}
-
-// ===***===***===***===***===***===***===***===***===***===***===***===***===***===***===***
-// query_top_k
-// ===***===***===***===***===***===***===***===***===***===***===***===***===***===***===***
-
-/// Queries the top-k expressions by weight matching a pattern
-pub struct QueryTopKCmd;
-
-impl CommandDefinition for QueryTopKCmd {
-    const NAME: &'static str = "query_top_k";
-    const CONST_CMD: &'static Self = &Self;
-    const CONSUME_WORKER: bool = false;
-    
-    fn args() -> &'static [ArgDef] {
-        &[
-            ArgDef{
-                arg_type: ArgType::String,
-                name: "pattern",
-                desc: "The s-expression pattern to match against",
-                required: true
-            },
-            ArgDef{
-                arg_type: ArgType::UInt,
-                name: "k",
-                desc: "Number of top results to return",
-                required: true
-            }
-        ]
-    }
-    
-    fn properties() -> &'static [PropDef] {
-        &[]
-    }
-    
-    async fn work(ctx: MorkService, cmd: Command, _thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
-        let pattern_str = cmd.args[0].as_str();
-        let k = cmd.args[1].as_u64() as usize;
-        
-        // Access the weighted space (read-only)
-        let weighted_space = ctx.0.space.weighted_space.lock()
-            .map_err(|e| CommandError::Internal(format!("Failed to lock weighted space: {}", e).into()))?;
-        
-        // Parse the pattern expression
-        let pattern = weighted_space.sexpr_to_expr(pattern_str)
-            .map_err(|e| CommandError::Internal(format!("Failed to parse pattern: {:?}", e).into()))?;
-        
-        // Query top-k expressions
-        let results = weighted_space.query_top_k(pattern.borrow(), k);
-        
-        // Format the results
-        let mut response = format!("Top {} results for pattern '{}':\n", k, pattern_str);
-        for (i, (expr, weight)) in results.iter().enumerate() {
-            // Convert expression back to string representation - we'll use a simple approach
-            let expr_bytes = unsafe { expr.span().as_ref().unwrap() };
-            let expr_str = String::from_utf8_lossy(expr_bytes);
-            response.push_str(&format!("{}. {} (weight: {})\n", i + 1, expr_str, weight.local_count));
-        }
-        
-        if results.is_empty() {
-            response.push_str("No results found.\n");
-        }
-        
-        Ok(response.into())
     }
 }
