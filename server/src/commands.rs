@@ -503,45 +503,52 @@ fn do_export(ctx: &MorkService, (reader, pattern): (ReadPermission, OwnedExpr), 
 fn dump_as_format<W: Write>(ctx: &MorkService, writer: &mut std::io::BufWriter<W>, (mut reader, pattern): (ReadPermission, OwnedExpr), template: OwnedExpr, format: DataFormat, max_write: usize, show_weights: bool) -> Result<(), CommandError> {
     match format {
         DataFormat::Metta => {
+            // Simple MeTTa export - no weights
+            ctx.0.space.dump_as_sexpr(writer, (&mut reader, pattern.borrow()), template.borrow(), max_write)
+                .map_err(|e| CommandError::internal(format!("failed to serialize to MeTTa S-Expressions: {e:?}")))?;
+        },
+        DataFormat::Json => {
+            // First dump to a temporary buffer
+            let mut temp_buffer = Vec::new();
+            ctx.0.space.dump_as_sexpr(&mut temp_buffer, (&mut reader, pattern.borrow()), template.borrow(), max_write)
+                .map_err(|e| CommandError::internal(format!("failed to serialize to MeTTa S-Expressions: {e:?}")))?;
+            
+            // Process each line and build JSON structure
+            let output = String::from_utf8_lossy(&temp_buffer);
+            let mut expressions = Vec::new();
+            
             if show_weights {
-                // Enhanced MeTTa export with weight information
+                // JSON with weight information
                 let weighted_space = ctx.0.space.weighted_space.lock()
                     .map_err(|e| CommandError::internal(format!("Failed to lock weighted space: {e:?}")))?;
                 
-                // First dump to a temporary buffer
-                let mut temp_buffer = Vec::new();
-                ctx.0.space.dump_as_sexpr(&mut temp_buffer, (&mut reader, pattern.borrow()), template.borrow(), max_write)
-                    .map_err(|e| CommandError::internal(format!("failed to serialize to MeTTa S-Expressions: {e:?}")))?;
-                
-                // Process each line and add weight information
-                let output = String::from_utf8_lossy(&temp_buffer);
-                println!("🔍 DEBUG: Processing export with weights enabled");
-                println!("🔍 DEBUG: Export output has {} bytes", temp_buffer.len());
-                
-                for (i, line) in output.lines().enumerate() {
+                for line in output.lines() {
                     if !line.trim().is_empty() {
-                        println!("🔍 DEBUG: Line {}: '{}'", i + 1, line.trim());
-                        
-                        let weight = weighted_space.get_expression_weight(line.trim());
-                        println!("🔍 DEBUG: Weight for '{}': {:?}", line.trim(), weight);
-                        
-                        let weight_display = match weight {
-                            Some(w) => format!("{:.2}", w),
-                            None => "0.00".to_string()
-                        };
-                        writeln!(writer, ";; Weight: {}", weight_display)
-                            .map_err(|e| CommandError::internal(format!("Error writing weight: {e:?}")))?;
-                        writeln!(writer, "{}", line)
-                            .map_err(|e| CommandError::internal(format!("Error writing expression: {e:?}")))?;
+                        let weight = weighted_space.get_expression_weight(line.trim()).unwrap_or(0.0);
+                        expressions.push(serde_json::json!({
+                            "expression": line.trim(),
+                            "weight": weight
+                        }));
                     }
                 }
+                
+                let json_response = serde_json::json!({
+                    "expressions": expressions
+                });
+                write!(writer, "{}", json_response.to_string())
+                    .map_err(|e| CommandError::internal(format!("Error writing JSON: {e:?}")))?;
             } else {
-                // Standard MeTTa export without weights
-                ctx.0.space.dump_as_sexpr(writer, (&mut reader, pattern.borrow()), template.borrow(), max_write).map_err(|e| CommandError::internal(format!("failed to serialize to MeTTa S-Expressions: {e:?}")))?;
+                // JSON without weights (simple array of expressions)
+                for line in output.lines() {
+                    if !line.trim().is_empty() {
+                        expressions.push(serde_json::json!(line.trim()));
+                    }
+                }
+                write!(writer, "{}", serde_json::json!(expressions).to_string())
+                    .map_err(|e| CommandError::internal(format!("Error writing JSON: {e:?}")))?;
             }
         },
-        DataFormat::Csv |
-        DataFormat::Json => {
+        DataFormat::Csv => {
             writer.write(b"Export Error: Unimplemented Export Format")?;
         },
         DataFormat::Raw => {
@@ -775,7 +782,6 @@ fn do_parse<SrcStream: Read + BufRead>(space: &ServerSpace, src: SrcStream, patt
     match file_type {
         DataFormat::Metta => {
             // Use load_sexpr_impl directly to get per-expression callback
-            let mut expression_count = 0;
             let count = mork::space::load_sexpr_impl(
                 space.symbol_table(),
                 src,
@@ -783,35 +789,24 @@ fn do_parse<SrcStream: Read + BufRead>(space: &ServerSpace, src: SrcStream, patt
                 template_expr,
                 space.write_zipper(writer),
                 Some(|expr_bytes: &[u8]| {
-                    expression_count += 1;
-                    println!("📥 Expression #{}: Parsed {} bytes", expression_count, expr_bytes.len());
-                    
                     // Convert bytes to S-Expression format (same as export)
                     let mut sexpr_buffer = Vec::new();
-                    if let Err(e) = mork::space::serialize_sexpr_into(
+                    if let Err(_) = mork::space::serialize_sexpr_into(
                         expr_bytes.as_ptr() as *mut u8, 
                         &mut sexpr_buffer, 
                         space.symbol_table()
                     ) {
-                        eprintln!("⚠️  Failed to serialize expression to S-Expr: {}", e);
                         return; // Skip this expression if serialization fails
                     }
                     
                     let expr_str = String::from_utf8_lossy(&sexpr_buffer).to_string();
-                    println!("   Content: {}", expr_str);
-                    println!("🔍 UPLOAD DEBUG: Storing weight for S-Expr key: '{}'", expr_str);
                     
                     // Track weight for each individual expression in S-Expression format
                     if let Ok(mut weighted_space) = space.weighted_space.lock() {
-                        if let Err(e) = weighted_space.track_expression(&expr_str) {
-                            eprintln!("⚠️  Failed to track expression weight: {}", e);
-                        } else {
-                            println!("📊 Weight tracked for expression");
-                        }
+                        let _ = weighted_space.track_expression(&expr_str);
                     }
                 })
             ).map_err(|e| CommandError::external(StatusCode::BAD_REQUEST, format!("{e:?}")))?;
-            println!("🎉 Loaded {count} atoms from MeTTa S-Expr");
         },
         DataFormat::Json => {
             unimplemented!();//GOAT
