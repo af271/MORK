@@ -19,6 +19,8 @@ use hyper::body::{Incoming as IncomingBody, Bytes, Frame};
 use http_body_util::BodyExt;
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+
+
 use futures_util::Stream;
 use url::Url;
 use mork_bytestring::{Expr, ExprZipper};
@@ -414,6 +416,12 @@ impl CommandDefinition for ExportCmd {
             name: "max_write",
             desc: "Max number of expressions to export",
             required: false
+        },
+        PropDef {
+            arg_type: ArgType::Flag,
+            name: "show_weights",
+            desc: "Show weight information for each exported expression",
+            required: false
         }]
     }
     async fn work(ctx: MorkService, cmd: Command, thread: Option<WorkThreadHandle>, _req: Request<IncomingBody>) -> Result<WorkResult, CommandError> {
@@ -453,9 +461,10 @@ impl CommandDefinition for ExportCmd {
         };
 
         let max_write = cmd.properties[2].as_ref().map(|x| x.as_u64() as usize).unwrap_or(usize::MAX);
+        let show_weights = cmd.properties[3].is_some();
         
         let out = tokio::task::spawn_blocking(move || -> Result<WorkResult, CommandError> {
-            do_export(&ctx, (pat_reader, pattern), template, format, file_path, max_write)
+            do_export(&ctx, (pat_reader, pattern), template, format, file_path, max_write, show_weights)
         }).await??;
 
         thread.unwrap().finalize().await;
@@ -466,13 +475,13 @@ impl CommandDefinition for ExportCmd {
 }
 
 /// Do the actual serialization
-fn do_export(ctx: &MorkService, (reader, pattern): (ReadPermission, OwnedExpr), template: OwnedExpr, format: DataFormat, file_path: Option<PathBuf>, max_write: usize) -> Result<WorkResult, CommandError> {
+fn do_export(ctx: &MorkService, (reader, pattern): (ReadPermission, OwnedExpr), template: OwnedExpr, format: DataFormat, file_path: Option<PathBuf>, max_write: usize, show_weights: bool) -> Result<WorkResult, CommandError> {
     let buffer = match &file_path {
         Some(file_path) => {
             // The rendered output will go to a file
             let file = std::fs::File::create(&file_path)?;
             let mut writer = std::io::BufWriter::new(file);
-            dump_as_format(ctx, &mut writer, (reader, pattern), template, format, max_write)?;
+            dump_as_format(ctx, &mut writer, (reader, pattern), template, format, max_write, show_weights)?;
             writer.flush()?;
             drop(writer);
             format!("Output written to file: {file_path:?}").into_bytes()
@@ -481,7 +490,7 @@ fn do_export(ctx: &MorkService, (reader, pattern): (ReadPermission, OwnedExpr), 
             // The rendered output will be returned directly
             let mut buffer = Vec::with_capacity(4096);
             let mut writer = std::io::BufWriter::new(&mut buffer);
-            dump_as_format(ctx, &mut writer, (reader, pattern), template, format, max_write)?;
+            dump_as_format(ctx, &mut writer, (reader, pattern), template, format, max_write, show_weights)?;
             writer.flush()?;
             drop(writer);
             buffer
@@ -491,10 +500,45 @@ fn do_export(ctx: &MorkService, (reader, pattern): (ReadPermission, OwnedExpr), 
     Ok(WorkResult::Immediate(hyper::body::Bytes::from(buffer)))
 }
 
-fn dump_as_format<W: Write>(ctx: &MorkService, writer: &mut std::io::BufWriter<W>, (mut reader, pattern): (ReadPermission, OwnedExpr), template: OwnedExpr, format: DataFormat, max_write: usize) -> Result<(), CommandError> {
+fn dump_as_format<W: Write>(ctx: &MorkService, writer: &mut std::io::BufWriter<W>, (mut reader, pattern): (ReadPermission, OwnedExpr), template: OwnedExpr, format: DataFormat, max_write: usize, show_weights: bool) -> Result<(), CommandError> {
     match format {
         DataFormat::Metta => {
-            ctx.0.space.dump_as_sexpr(writer, (&mut reader, pattern.borrow()), template.borrow(), max_write).map_err(|e| CommandError::internal(format!("failed to serialize to MeTTa S-Expressions: {e:?}")))?;
+            if show_weights {
+                // Enhanced MeTTa export with weight information
+                let weighted_space = ctx.0.space.weighted_space.lock()
+                    .map_err(|e| CommandError::internal(format!("Failed to lock weighted space: {e:?}")))?;
+                
+                // First dump to a temporary buffer
+                let mut temp_buffer = Vec::new();
+                ctx.0.space.dump_as_sexpr(&mut temp_buffer, (&mut reader, pattern.borrow()), template.borrow(), max_write)
+                    .map_err(|e| CommandError::internal(format!("failed to serialize to MeTTa S-Expressions: {e:?}")))?;
+                
+                // Process each line and add weight information
+                let output = String::from_utf8_lossy(&temp_buffer);
+                println!("🔍 DEBUG: Processing export with weights enabled");
+                println!("🔍 DEBUG: Export output has {} bytes", temp_buffer.len());
+                
+                for (i, line) in output.lines().enumerate() {
+                    if !line.trim().is_empty() {
+                        println!("🔍 DEBUG: Line {}: '{}'", i + 1, line.trim());
+                        
+                        let weight = weighted_space.get_expression_weight(line.trim());
+                        println!("🔍 DEBUG: Weight for '{}': {:?}", line.trim(), weight);
+                        
+                        let weight_display = match weight {
+                            Some(w) => format!("{:.2}", w),
+                            None => "0.00".to_string()
+                        };
+                        writeln!(writer, ";; Weight: {}", weight_display)
+                            .map_err(|e| CommandError::internal(format!("Error writing weight: {e:?}")))?;
+                        writeln!(writer, "{}", line)
+                            .map_err(|e| CommandError::internal(format!("Error writing expression: {e:?}")))?;
+                    }
+                }
+            } else {
+                // Standard MeTTa export without weights
+                ctx.0.space.dump_as_sexpr(writer, (&mut reader, pattern.borrow()), template.borrow(), max_write).map_err(|e| CommandError::internal(format!("failed to serialize to MeTTa S-Expressions: {e:?}")))?;
+            }
         },
         DataFormat::Csv |
         DataFormat::Json => {
@@ -742,11 +786,22 @@ fn do_parse<SrcStream: Read + BufRead>(space: &ServerSpace, src: SrcStream, patt
                     expression_count += 1;
                     println!("📥 Expression #{}: Parsed {} bytes", expression_count, expr_bytes.len());
                     
-                    // Convert bytes to string for display (safely)
-                    let expr_str = mork_bytestring::serialize(expr_bytes);
-                    println!("   Content: {}", expr_str);
+                    // Convert bytes to S-Expression format (same as export)
+                    let mut sexpr_buffer = Vec::new();
+                    if let Err(e) = mork::space::serialize_sexpr_into(
+                        expr_bytes.as_ptr() as *mut u8, 
+                        &mut sexpr_buffer, 
+                        space.symbol_table()
+                    ) {
+                        eprintln!("⚠️  Failed to serialize expression to S-Expr: {}", e);
+                        return; // Skip this expression if serialization fails
+                    }
                     
-                    // Track weight for each individual expression
+                    let expr_str = String::from_utf8_lossy(&sexpr_buffer).to_string();
+                    println!("   Content: {}", expr_str);
+                    println!("🔍 UPLOAD DEBUG: Storing weight for S-Expr key: '{}'", expr_str);
+                    
+                    // Track weight for each individual expression in S-Expression format
                     if let Ok(mut weighted_space) = space.weighted_space.lock() {
                         if let Err(e) = weighted_space.track_expression(&expr_str) {
                             eprintln!("⚠️  Failed to track expression weight: {}", e);

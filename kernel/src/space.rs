@@ -1538,7 +1538,8 @@ impl DefaultSpace {
             template,
             w,
             || unsafe { std::ptr::write_volatile(&mut error, true); },
-            usize::MAX
+            usize::MAX,
+            None
         );
         if error { Err(s.to_string()) } else { Ok(c) }
     }
@@ -1552,7 +1553,8 @@ pub(crate) fn dump_as_sexpr_impl<'s, RZ, W: std::io::Write>(
     template    : Expr,
     w           : &mut W,
     mut f       : impl FnMut(),
-    max_write   : usize
+    max_write   : usize,
+    mut callback : Option<&mut dyn FnMut(usize, &str)>
 ) -> usize
     where
     RZ : ZipperMoving + ZipperReadOnlySubtries<'s, ()> + ZipperAbsolutePath
@@ -1578,7 +1580,9 @@ pub(crate) fn dump_as_sexpr_impl<'s, RZ, W: std::io::Write>(
         let mut varbuf = [0u8; 66];
         varbuf[0] = b'"';
 
-        Expr{ ptr: buffer.as_ptr().cast_mut() }.serialize(w, |s| {
+        // Serialize expression to string for callback and writing
+        let mut expr_buffer = Vec::new();
+        Expr{ ptr: buffer.as_ptr().cast_mut() }.serialize(&mut expr_buffer, |s| {
             #[cfg(feature="interning")]
             let s_slice = {
                 let symbol = i64::from_be_bytes(s.try_into().unwrap()).to_be_bytes();
@@ -1597,6 +1601,19 @@ pub(crate) fn dump_as_sexpr_impl<'s, RZ, W: std::io::Write>(
                 s_slice
             }
         });
+        
+        let expr_str = String::from_utf8_lossy(&expr_buffer);
+        
+        // Call the callback if provided
+        if let Some(cb) = callback.as_mut() {
+            cb(i + 1, &expr_str);
+        }
+        
+        // Write the expression to the output
+        if let Err(_) = w.write_all(&expr_buffer) {
+            f();
+            return false;
+        }
 
         if i < max_write {
             // GOAT, we can't make a safely move a string through that setjmp machinery without risking leaking memory

@@ -442,10 +442,12 @@ fn get_query_key_raw<'a>(in_str: &'a str, key: &str) -> Option<&'a str> {
 fn get_query_key_flag<'a>(in_str: &'a str, key: &str) -> Option<ArgVal> {
     match get_query_key_raw(in_str, key) {
         Some(query_str) => {
-            //QUESTION, do we want to allow "flag=yes" or "flag=no"?
-            //Right now, we just go by the absence of presence of "flag"
-            debug_assert_eq!(query_str, "");
-            Some(ArgVal::Flag)
+            // Allow both "flag" and "flag=true" syntax
+            if query_str == "" || query_str == "true" {
+                Some(ArgVal::Flag)
+            } else {
+                None
+            }
         },
         None => None
     }
