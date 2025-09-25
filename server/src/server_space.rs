@@ -9,7 +9,6 @@ use pathmap::zipper_tracking::Conflict;
 use pathmap::zipper::*;
 
 use mork::{PermissionArb, PathPermissionErr, Space, SpaceReaderZipper, SpaceWriterZipper};
-use mork::weighted_space::WeightedSpace;
 
 use crate::status_map::*;
 use crate::commands::*;

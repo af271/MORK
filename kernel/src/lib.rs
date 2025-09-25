@@ -2,7 +2,6 @@ pub mod space;
 mod json_parser;
 pub mod prefix;
 mod space_temporary;
-pub mod weighted_space;
 pub use space_temporary::*;
 
 pub use mork_bytestring::{ExprTrait, Expr, OwnedExpr};

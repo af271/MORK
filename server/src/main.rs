@@ -574,10 +574,6 @@ impl Service<Request<IncomingBody>> for MorkService {
             | GET => MettaThreadCmd
             | GET => MettaThreadSuspendCmd
             | POST => TransformCmd
-            
-            // Weighted space commands
-            | POST => AddExpressionCmd
-            | GET => ExportWeightedCmd
         }
         #[cfg(feature="neo4j")]
         dispatch!{
@@ -601,10 +597,6 @@ impl Service<Request<IncomingBody>> for MorkService {
             | GET => MettaThreadCmd
             | GET => MettaThreadSuspendCmd
             | POST => TransformCmd
-            
-            // Weighted space commands
-            | POST => AddExpressionCmd
-            | GET => ExportWeightedCmd
         }
     }
 }

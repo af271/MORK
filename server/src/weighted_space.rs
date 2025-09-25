@@ -52,24 +52,22 @@ mod tests {
 
     #[test]
     fn test_server_weighted_space_creation() {
-        let server_space = ServerSpace::new();
-        let weighted_space = ServerWeightedSpace::new(server_space);
+        let weighted_space = ServerWeightedSpace::new();
         
-        // Should be able to add expressions
-        // TODO: Add more comprehensive tests once add_expression is implemented
+        // Should be able to create a new ServerWeightedSpace
+        assert!(weighted_space.weights.lock().is_ok());
     }
 
     #[test] 
     fn test_weight_tracking() {
-        let server_space = ServerSpace::new();
-        let mut weighted_space = ServerWeightedSpace::new(server_space);
+        let mut weighted_space = ServerWeightedSpace::new();
         
         // Add an expression
-        weighted_space.add_expression("(test expression)").unwrap();
+        weighted_space.track_expression("(test expression)").unwrap();
         
         // Check that weight was tracked
-        let weight = weighted_space.get_expression_weight(b"(test expression)");
+        let weight = weighted_space.get_expression_weight("(test expression)");
         assert!(weight.is_some());
-        assert_eq!(weight.unwrap().local_count, 1);
+        assert_eq!(weight.unwrap(), 1.0);
     }
 }
