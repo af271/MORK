@@ -776,37 +776,44 @@ fn detect_file_type(_file_path: &Path, uri: &str) -> Result<DataFormat, CommandE
     DataFormat::from_str(extension).ok_or_else(|| file_extension_err())
 }
 
+/// Helper function to load S-expressions with weight tracking
+fn load_sexpr_with_weights<SrcStream: Read + BufRead>(
+    space: &ServerSpace, 
+    src: SrcStream, 
+    pattern: mork_bytestring::Expr, 
+    template: mork_bytestring::Expr, 
+    writer: &mut WritePermission
+) -> Result<usize, CommandError> {
+    mork::space::load_sexpr_impl(
+        space.symbol_table(),
+        src,
+        pattern,
+        template,
+        space.write_zipper(writer),
+        // None::<fn(&[u8])>,
+        Some(|expr_bytes: &[u8]| {
+            // Convert bytes to S-Expression format for weight tracking
+            let mut sexpr_buffer = Vec::new();
+            if let Ok(_) = mork::space::serialize_sexpr_into(
+                expr_bytes.as_ptr() as *mut u8, 
+                &mut sexpr_buffer, 
+                space.symbol_table()
+            ) {
+                let expr_str = String::from_utf8_lossy(&sexpr_buffer).to_string();
+                if let Ok(mut weighted_space) = space.weighted_space.lock() {
+                    let _ = weighted_space.track_expression(&expr_str);
+                }
+            }
+        })
+    ).map_err(|e| CommandError::external(StatusCode::BAD_REQUEST, format!("{e:?}")))
+}
+
 fn do_parse<SrcStream: Read + BufRead>(space: &ServerSpace, src: SrcStream, pattern: OwnedExpr, template: OwnedExpr, writer: &mut WritePermission, file_type: DataFormat) -> Result<(), CommandError> {
     let pattern_expr = pattern.borrow();
     let template_expr = template.borrow();
     match file_type {
         DataFormat::Metta => {
-            // Use load_sexpr_impl directly to get per-expression callback
-            let count = mork::space::load_sexpr_impl(
-                space.symbol_table(),
-                src,
-                pattern_expr,
-                template_expr,
-                space.write_zipper(writer),
-                Some(|expr_bytes: &[u8]| {
-                    // Convert bytes to S-Expression format (same as export)
-                    let mut sexpr_buffer = Vec::new();
-                    if let Err(_) = mork::space::serialize_sexpr_into(
-                        expr_bytes.as_ptr() as *mut u8, 
-                        &mut sexpr_buffer, 
-                        space.symbol_table()
-                    ) {
-                        return; // Skip this expression if serialization fails
-                    }
-                    
-                    let expr_str = String::from_utf8_lossy(&sexpr_buffer).to_string();
-                    
-                    // Track weight for each individual expression in S-Expression format
-                    if let Ok(mut weighted_space) = space.weighted_space.lock() {
-                        let _ = weighted_space.track_expression(&expr_str);
-                    }
-                })
-            ).map_err(|e| CommandError::external(StatusCode::BAD_REQUEST, format!("{e:?}")))?;
+            let _count = load_sexpr_with_weights(space, src, pattern_expr, template_expr, writer)?;
         },
         DataFormat::Json => {
             unimplemented!();//GOAT
@@ -1918,3 +1925,5 @@ async fn misbehaving_transform() -> Result<(), ()> {
     println!("{}", String::from_utf8(out).unwrap());
     Ok(())
 }
+
+
