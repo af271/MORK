@@ -148,18 +148,37 @@ class MORK:
         """
         A request to download data from the server
         """
-        #TODO: Specify format
-        def __init__(self, pattern, template, max_results=None):
+        def __init__(self, pattern, template, max_results=None, format="metta", show_weights=False):
             self.pattern = pattern
             self.template = template
+            self.format = format
+            self.show_weights = show_weights
             self.data = None
-            super().__init__("get", f"/export/{quote(self.pattern)}/{quote(self.template)}/" + (f"?max_write={max_results}" if max_results else ""))
+            
+            # Build query parameters
+            params = []
+            if max_results is not None:
+                params.append(f"max_write={max_results}")
+            if format != "metta":
+                params.append(f"format={format}")
+            if show_weights and format == "json":
+                params.append("show_weights=true")
+            
+            query_string = "?" + "&".join(params) if params else ""
+            super().__init__("get", f"/export/{quote(self.pattern)}/{quote(self.template)}/{query_string}")
 
         def dispatch(self, server):
             super().dispatch(server)
             # print("download status code:", self.response.status_code)
             if self.response and self.response.status_code == 200:
-                self.data = self.response.text
+                if self.format == "json":
+                    try:
+                        self.data = json.loads(self.response.text)
+                    except json.JSONDecodeError:
+                        # Fallback to text if JSON parsing fails
+                        self.data = self.response.text
+                else:
+                    self.data = self.response.text
 
         def poll(self):
             return (True, "download already blocks")
@@ -391,19 +410,25 @@ class MORK:
         cmd.dispatch(self)
         return cmd
 
-    def download_(self, max_results=None):
+    def download_(self, max_results=None, format="metta", show_weights=False):
         """
         Download everything in the scope
         """
-        return self.download("$x", "$x", max_results)
+        return self.download("$x", "$x", max_results, format, show_weights)
 
-    def download(self, pattern, template, max_results=None):
+    def download(self, pattern, template, max_results=None, format="metta", show_weights=False):
         """
         Download items from `pattern` and format them using `template`
+        
+        Args:
+            pattern: Pattern to match expressions
+            template: Template for formatting output
+            max_results: Maximum number of results to return
+            format: Output format ("metta" or "json")
+            show_weights: Include weight information (only for JSON format)
         """
-        #TODO: Specify format
         io = self.ns.format(pattern)
-        cmd = self.Download(io, template, max_results)
+        cmd = self.Download(io, template, max_results, format, show_weights)
         self.history.append(cmd)
         cmd.dispatch(self)
         return cmd
