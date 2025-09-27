@@ -163,6 +163,12 @@ impl CommandDefinition for ClearCmd {
         let mut wz = ctx.0.space.write_zipper(&mut writer);
         wz.remove_branches(true);
         wz.remove_val(true);
+
+        // WeightedSpace ebenfalls leeren
+        if let Ok(mut weighted_space) = ctx.0.space.weighted_space.lock() {
+            weighted_space.weights = std::sync::Arc::new(std::sync::Mutex::new(pathmap::weighted_trie::WeightedTriemap::new()));
+        }
+
         Ok("ACK. Cleared".into())
     }
 }
@@ -1822,7 +1828,7 @@ impl<'a> DerivedPrefix<'a> {
     }
 }
 
-// wrapper for [`mork_bytestring::Expr::prefix`] to make the interface more straight-forward
+/// wrapper for [`mork_bytestring::Expr::prefix`] to make the interface more straight-forward
 fn derive_prefix_from_expr_slice(expr_slice : &[u8]) -> DerivedPrefix<'_>{
     unsafe {
       match (mork_bytestring::Expr{
